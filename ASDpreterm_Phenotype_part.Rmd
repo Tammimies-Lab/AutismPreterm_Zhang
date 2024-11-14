@@ -1,0 +1,373 @@
+---
+title: "ASDpreterm_Phenotype_part"
+Authors: "Yali Zhang"
+Correspondence: "Dr. Kristiina Tammimies, kristiina.tammimies@ki.se"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## GitHub Documents
+
+This is an R Markdown format used for performing the phenotype analysis part in ASD-preterm project.
+
+### Pre-process of the dataset
+```{r, message=F, warning=F}
+# Package loading
+library(readxl)
+library(stringr)
+library(dplyr)
+library(ggsignif)
+library(ggplot2)
+library(forcats)
+library(VennDiagram)
+library(epiR)
+library(epitools)
+library(stringr)
+library(cowplot)
+library(geepack)
+library(ggpubr)
+library(reshape2)
+
+BMS_V9 <- read.csv("../phenotype_dataset/SPARK_collection_v9_2022-12-12/basic_medical_screening_2022-12-12.csv",header = T)
+BMS_V9_ASD <- BMS_V9[BMS_V9$asd=="True",]
+BMS_V9_ASD[is.na(BMS_V9_ASD$birth_prem),'birth_prem'] <- 0
+
+# annotate preterm birth subgroup
+for (i in 1:dim(BMS_V9_ASD)[1]){
+  if (BMS_V9_ASD$birth_prem[i] == 0){
+    BMS_V9_ASD[i,'Stage'] <- 'Term'
+  }else if(is.na(BMS_V9_ASD$gest_age[i])){
+    BMS_V9_ASD[i,'Stage'] <- 'Unknown gestational age'
+  }else{
+    g_age <- as.numeric(BMS_V9_ASD$gest_age[i])
+    if (g_age < 28){
+      BMS_V9_ASD[i,'Stage'] <- 'Extremely preterm'
+    }else if (g_age > 27 && g_age < 32) {
+      BMS_V9_ASD[i,'Stage'] <- 'Very preterm'
+    }else if (g_age >= 32 && g_age < 34) {
+      BMS_V9_ASD[i,'Stage'] <- 'Moderate preterm'
+    }else if(g_age >= 34 && g_age < 37){
+      BMS_V9_ASD[i,'Stage'] <- 'Late preterm'
+    }
+  }
+}
+
+# annotate diagnostic category
+v_file <- as.data.frame(read_excel('../Preterm_analysis_202404/5_phen_cluster/pheno_selection_240417.xlsx',sheet = 1, na = 'NA'))
+BMS_V9_ASD_pheno <- BMS_V9_ASD[,c('subject_sp_id','asd','basic_medical_measure_validity_flag','gest_age','birth_prem','Stage',v_file[v_file$Data_file == 'basic_medical_screening','variable'])]
+
+for (i in levels(factor(v_file$Data_file))) {
+  if (i == 'basic_medical_screening'){
+    next
+  }else{
+    file_p <- paste0('../phenotype_dataset/SPARK_collection_v9_2022-12-12/',i,'_2022-12-12.csv')
+    phe_file <- read.csv(file_p,header = T)
+    for (j in 1:length(BMS_V9_ASD_pheno$subject_sp_id)){
+      if (BMS_V9_ASD_pheno$subject_sp_id[j] %in% phe_file$subject_sp_id){
+        for (k in v_file[v_file$Data_file == i,'variable']){
+          k_n <- paste0(i,':',k)
+          
+          if (length(phe_file[phe_file$subject_sp_id == BMS_V9_ASD_pheno$subject_sp_id[j],k]) > 1){
+            test_year <- phe_file[phe_file$subject_sp_id == BMS_V9_ASD_pheno$subject_sp_id[j],'test_year']
+            year_max <- max(test_year)
+            
+            value <- mean( phe_file[(phe_file$subject_sp_id == BMS_V9_ASD_pheno$subject_sp_id[j] & phe_file$test_year == year_max[1]),k]  )
+          }else{
+            value <- phe_file[phe_file$subject_sp_id == BMS_V9_ASD_pheno$subject_sp_id[j],k]
+          }
+          
+          BMS_V9_ASD_pheno[j,k_n] <- value
+          if (is.na(BMS_V9_ASD_pheno[j,k_n])){
+            BMS_V9_ASD_pheno[j,k_n] <- 'blank'
+          }
+        }
+      }else{
+        for (k in v_file[v_file$Data_file == i,'variable']){
+          k_n <- paste0(i,':',k)
+          BMS_V9_ASD_pheno[j,k_n] <- 'unknown'
+        }
+      }
+    }
+  }
+}
+
+BMC_V1 <- unique(v_file[,'variable_group'])
+BMC_V1 <- c(BMC_V1[1:9],"cbcl_1_5:total_problems_t_score","cbcl_6_18:total_problems_t_score", "dcdq:final_score", "rbsr:total_final_score","scq:final_score","iq:fsiq_score"  )
+BMC_V2 <- unique(v_file[v_file$Data_file == 'basic_medical_screening','variable_group2'])
+
+for (i in 1:length(BMS_V9_ASD_pheno$subject_sp_id)){
+  for (j in BMC_V2) {
+    v_list <- v_file[v_file$variable_group2 == j,'variable']
+    count <- sum(BMS_V9_ASD_pheno[i,v_list],na.rm = T)
+    BMS_V9_ASD_pheno[i,j] <- count
+  }
+  
+  b_list <- unique(v_file[v_file$variable_group == 'birth','variable_group2'])
+  count <- sum(BMS_V9_ASD_pheno[i,b_list] > 0)
+  BMS_V9_ASD_pheno[i,'birth'] <- count
+}
+
+if (i %in% BMC_V1[1:9]){
+  BMS_V9_ASD_pheno[which(is.na(BMS_V9_ASD_pheno[,i])),i] <- 0
+}
+
+variable_data_1 <- BMS_V9_ASD_pheno[,c(BMC_V1[1:9],'birth_prem')]
+variable_data_2 <- BMS_V9_ASD_pheno[,c(BMC_V1[10:15],'birth_prem')]
+```
+
+### Prevalence of diagnostic category
+```{r, message=F, warning=F}
+single_record <- variable_data_1[,1:9]
+single_record[single_record > 0] <- 1
+
+single_record <- cbind.data.frame(single_record,variable_data_1[10])
+
+df_prem <- c()
+df_phe <- c()
+df_nall <- c()
+df_nhave <- c()
+df_freq <- c()
+for (i in unique(single_record$birth_prem)) {
+  for (j in colnames(variable_data_1)[1:9]) {
+    df_prem <- c(df_prem,i)
+    df_phe <- c(df_phe,j)
+    df_nhave <- c(df_nhave,sum(single_record[single_record$birth_prem == i,j] > 0))
+    df_nall <- c(df_nall,sum(single_record$birth_prem == i))
+    df_freq <- c(df_freq,sum(single_record[single_record$birth_prem == i,j] > 0)/sum(single_record$birth_prem == i))
+  }
+}
+freq_df <- cbind.data.frame('Delivery' = df_prem,
+                            'Phenotype' = df_phe,
+                            'Num_with' = df_nhave,
+                            'Num_all' = df_nall,
+                            'Freq' = df_freq)
+freq_df$Delivery <- ifelse(freq_df$Delivery == 0, 'Term', 'Preterm')
+freq_df$Delivery <- as.factor(freq_df$Delivery)
+
+# Odds ratio
+delivery <- BMS_V9_ASD_pheno$birth_prem
+for (phe in BMC_V1[1:9]){
+  # Create a binary outcome variable indicating preterm vs Term status
+  diagnosis <- single_record[,phe]
+  # Calculate the 2x2 contingency table
+  table <- table(delivery, diagnosis)
+  # phe <- str_to_title(phe)
+  freq_df[freq_df$Phenotype == phe,'OR'] <- oddsratio(table)$measure[2,1]
+  freq_df[freq_df$Phenotype == phe,'lower_CI'] <- oddsratio(table)$measure[2,2]
+  freq_df[freq_df$Phenotype == phe,'upper_CI'] <- oddsratio(table)$measure[2,3]
+  freq_df[freq_df$Phenotype == phe,'chi_square_p_OR'] <- oddsratio(table)$p.value[2,3]
+}
+
+p_values11 <- unique(freq_df$chi_square_p_OR)
+# Apply FDR correction
+p_adjusted11 <- p.adjust(p_values11, method = "fdr")
+freq_df$adj_chi_square_p_OR <- c(p_adjusted11,p_adjusted11)
+
+freq_df$Phenotype <- str_to_title(freq_df$Phenotype)
+freq_df$Phenotype <- as.factor(freq_df$Phenotype)
+
+target_lable_or <- paste0(c('Preterm','Term'),' (n=',c(sum(BMS_V9_ASD_pheno$birth_prem == 1),sum(BMS_V9_ASD_pheno$birth_prem == 0)),')')
+
+ggplot(freq_df,aes(x=Phenotype,y=Freq,fill=Delivery))+
+  geom_bar(stat = 'identity',position=position_dodge())+
+  geom_text(aes(label=round(Freq,2),vjust = -0.2),
+            position=position_dodge(width=1),
+            size=2.5)+
+  theme_bw()+
+  ylab('Frequency')+
+  theme(axis.title = element_text(size=10),
+        axis.text = element_text(size=9),
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(), 
+        axis.text.x = element_text(size=8,angle = 30,hjust = 1),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=9),
+        legend.position = "none")+
+  geom_point(aes(y = OR),
+             color = "black", size = 1)+
+  geom_errorbar(aes(ymin = lower_CI, ymax = upper_CI), width = 0.1) +  
+  geom_hline(aes(yintercept = 1),colour = 'grey', linetype = "dashed")+
+  scale_fill_manual(name="Delivery term of ASD",values = c('#C51D1E',"#4792C4"),
+                    breaks=levels(factor(freq_df$Delivery)),labels=c(target_lable_or))+
+  scale_y_continuous(sec.axis = sec_axis(~., name="Odds Ratio")) 
+```
+
+### Multimorbidity
+```{r, message=F, warning=F}
+v_list <- BMC_V1[1:9]
+for (i in 1:nrow(single_record)){
+  single_record[i,'diag_n_9group'] <- sum(single_record[i,v_list],na.rm = T)
+}
+# rate of individual for each number of diagnosis
+item_list <- c()
+group_list <- c()
+prop_list <- c()
+num_list <- c()
+for (i in 0:4){
+  item_list <- c(item_list,rep(i,2))
+  group_list <- c(group_list,c('Preterm','Term'))
+  
+  prop_list <- c(prop_list, sum(single_record[single_record$birth_prem == 1, 'diag_n_9group'] == i, na.rm = T)/length(single_record[single_record$birth_prem == 1, 'diag_n_9group']))
+  prop_list <- c(prop_list, sum(single_record[single_record$birth_prem == 0, 'diag_n_9group'] == i, na.rm = T)/length(single_record[single_record$birth_prem == 0, 'diag_n_9group']))
+  
+  num_list <- c(num_list,c(sum(single_record[single_record$birth_prem == 1, 'diag_n_9group'] == i, na.rm = T),
+                           sum(single_record[single_record$birth_prem == 0, 'diag_n_9group'] == i, na.rm = T)))
+}
+
+item_list <- c(item_list,rep('>=5',2))
+group_list <- c(group_list,c('Preterm','Term'))
+
+prop_list <- c(prop_list, sum(single_record[single_record$birth_prem == 1, 'diag_n_9group'] >= 5)/length(single_record[single_record$birth_prem == 1, 'diag_n_9group']))
+prop_list <- c(prop_list, sum(single_record[single_record$birth_prem == 0, 'diag_n_9group'] >= 5)/length(single_record[single_record$birth_prem == 0, 'diag_n_9group']))
+num_list <- c(num_list,c(sum(single_record[single_record$birth_prem == 1, 'diag_n_9group'] >= 5),
+                         sum(single_record[single_record$birth_prem == 0, 'diag_n_9group'] >= 5)))
+
+# rate for the individual in each group for each number of diagnosis
+diag_p_df_3 <- cbind.data.frame('diag_n_9group' = item_list,'Group' = group_list, 'prop' = prop_list )
+diag_p_df_3$diag_n_9group <- as.factor(diag_p_df_3$diag_n_9group)
+diag_p_df_3$Group <- factor(diag_p_df_3$Group)
+diag_p_df_3$diag_n_9group <- factor(diag_p_df_3$diag_n_9group,levels = c("0","1","2","3","4",">=5"))
+
+# chi-square test for groups
+x2_test_df <- data.frame(row.names = levels(diag_p_df_3$diag_n_9group)) 
+for (i in 1:length(levels(diag_p_df_3$Group))){
+  group <- levels(diag_p_df_3$Group)[i]
+  for (j in rownames(x2_test_df)){
+    x2_test_df[j,group] <- diag_p_df_3[diag_p_df_3$diag_n_9group==j & diag_p_df_3$Group == group,'prop']
+  }
+}
+
+x2_test_df <- as.data.frame(matrix(num_list,6,2,byrow = T))
+rownames(x2_test_df) <- c("0","1","2","3","4",">=5")
+colnames(x2_test_df) <- c('Preterm','Term')
+chisq.test(x2_test_df,rescale.p = TRUE)
+
+# visualization 
+# p_ASD_multimorbidity <-
+ggplot(diag_p_df_3,aes(x=diag_n_9group,y=prop,fill=Group))+
+  geom_bar(stat = 'identity',position=position_dodge(),width = 0.8)+
+  labs(x = 'Number of multimorbidities', y = 'Frequency')+
+  theme_bw()+
+  scale_fill_manual(name="Delivery term of ASD",values = c('#C51D1E',"#4792C4"),
+                    breaks=levels(factor(diag_p_df_3$Group)),labels=c(target_lable_or))+
+  theme(axis.title = element_text(size=10),
+        axis.text = element_text(size=9),
+        panel.grid.major = element_blank(), 
+        axis.text.x = element_text(size=8),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=9),
+        legend.position = 'top')
+```
+
+### Quantitative measures
+```{r, message=F, warning=F, warning=F}
+modified_v <- c(tools::toTitleCase(BMC_V1[1:9]),"CBCL1-5: Total Problems t Score","CBCL6-18: Total Problems t Score",
+                "DCDQ: Final Score","RBS-R:Total Final Score"  ,        
+                "SCQ: Final Score","IQ: Fsiq Score" )
+
+plot_list_2 <- list()
+wilcox_test_list <- c()
+for (n in 10:15){
+  i <- BMC_V1[n]
+  modified_string <- modified_v[n]
+  plot_df_11 <- BMS_V9_ASD_pheno
+  
+    plot_df_11 <- plot_df_11[-which(plot_df_11[,i] =='unknown'),] # 817893
+    plot_df_11 <- plot_df_11[-which(plot_df_11[,i] == 'blank'),] # 815563
+  
+  plot_df_11[,i] <- as.numeric(plot_df_11[,i])
+  plot_df_11$birth_prem <- factor(plot_df_11$birth_prem,levels = c("1","0"))
+  y_point <- plot_df_11[,i]
+  
+  plot_fi <- plot_df_11[,c(i,'birth_prem')]
+  colnames(plot_fi) <- c('modified_string','birth_prem')
+  
+  plot_n <- ggplot(plot_fi,aes(x=birth_prem,y=modified_string,fill = birth_prem))+
+    geom_point(aes(color = birth_prem), position = position_jitter(w = .15), size = 0.5)+
+    geom_boxplot(alpha=1,outlier.size = 0.5,size = 0.5,width=0.1,fill='transparent')+
+    geom_violin(alpha=0.5)+
+    ggtitle(modified_string)+
+    xlab('')+
+    ylab('Value')+
+    ylim(0,max(as.numeric(plot_fi[,1]))+max(as.numeric(plot_fi[,1]))/5)+
+    theme_bw()+
+    geom_signif(comparisons = list(c("0", "1")),
+                map_signif_level = T,
+                test = wilcox.test,
+                textsize=3)+
+    theme(axis.title = element_blank(),
+          axis.text = element_text(size=8),
+          plot.title = element_text(size=8),
+          panel.grid.major = element_blank(), 
+          legend.text = element_text(size=8),
+          legend.title = element_text(size=9),
+          legend.position = "none")+
+    scale_x_discrete(breaks = c('0','1'),
+                     labels = c(paste0(c('Term','Preterm'),'\n(n=',c(sum(plot_df_11$birth_prem == '0'),sum(plot_df_11$birth_prem == '1')),')')))+
+    scale_fill_manual(values = c('#C51D1E',"#4792C4"))+
+    scale_color_manual(values =c('#C51D1E',"#4792C4"))
+  
+  plot_list_2[[n]] <- plot_n
+  
+  wilcox_test <- wilcox.test(plot_df_11[plot_df_11$birth_prem == '1',i], plot_df_11[plot_df_11$birth_prem == '0',i])
+  wilcox_test_list <- c(wilcox_test_list,wilcox_test$p.value)
+}
+
+p_values22 <-wilcox_test_list
+# Apply fdr correction
+p_adjusted222 <- p.adjust(p_values22, method = "fdr")
+
+## manually change star sign with adjust p-value
+i <-  "cbcl_1_5:total_problems_t_score" 
+plot_df_11 <- BMS_V9_ASD_pheno
+modified_string <- "CBCL1-5: Total Problems t Score"
+plot_df_11 <- plot_df_11[-which(plot_df_11[,i] =='unknown'),] # 817893
+plot_df_11 <- plot_df_11[-which(plot_df_11[,i] == 'blank'),] # 815563
+plot_df_11[,i] <- as.numeric(plot_df_11[,i])
+plot_df_11$birth_prem <- factor(plot_df_11$birth_prem,levels = c("1","0"))
+y_point <- plot_df_11[,i]
+plot_fi <- plot_df_11[,c(i,'birth_prem')]
+colnames(plot_fi) <- c('modified_string','birth_prem')
+
+plot_n <-
+  ggplot(plot_fi,aes(x=birth_prem,y=modified_string,fill = birth_prem))+
+  geom_point(aes(color = birth_prem), position = position_jitter(w = .15), size = 0.5)+
+  geom_boxplot(alpha=1,outlier.size = 0.5,size = 0.5,width=0.1,fill='transparent')+
+  geom_violin(alpha=0.5)+
+  ggtitle(modified_string)+
+  xlab('')+
+  ylab('Value')+
+  ylim(0,max(as.numeric(plot_fi[,1]))+max(as.numeric(plot_fi[,1]))/5)+
+  theme_bw()+
+  geom_signif(annotations = '**'
+              ,y_position = 102
+              ,xmin = 1
+              ,xmax = 2
+              ,tip_length = 0.03
+              ,color="black",
+              textsize=3)+
+  theme(axis.title = element_blank(),
+        axis.text = element_text(size=8),
+        plot.title = element_text(size=8),
+        panel.grid.major = element_blank(), 
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=9),
+        legend.position = "none")+
+  scale_x_discrete(breaks = c('0','1'),
+                   labels = c(paste0(c('Term','Preterm'),'\n(n=',c(sum(plot_df_11$birth_prem == '0'),sum(plot_df_11$birth_prem == '1')),')')))+
+  scale_fill_manual(values = c('#C51D1E',"#4792C4"))+
+  scale_color_manual(values =c('#C51D1E',"#4792C4"))
+
+plot_list_2[[10]] <- plot_n
+### merge figures
+plot_grid_args_2 <- c(plot_list_2[10:15], ncol = 2, labels = "AUTO",label_size=10)  # Combine list of plots with additional arguments
+merge_plot_2 <- do.call(plot_grid,plot_grid_args_2)
+merge_plot_title_2 <- ggdraw() + draw_label("Score distribution for questionnaires", fontface = 'bold', x = 0, hjust = 0,size = 10) + theme(plot.margin = margin(0, 0, 0, 5))
+merge_plot_print_2 <- plot_grid(merge_plot_title_2, merge_plot_2, ncol = 1, rel_heights = c(0.1,1))
+print(merge_plot_print_2)
+
+```
+

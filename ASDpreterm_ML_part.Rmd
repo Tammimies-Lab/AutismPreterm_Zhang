@@ -1,0 +1,403 @@
+---
+title: "ASDpreterm_ML"
+Authors: "Yali Zhang"
+Correspondence: "Dr. Kristiina Tammimies, kristiina.tammimies@ki.se"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## GitHub Documents
+
+This is an R Markdown format used for performing the machine learning analysis in ASD-preterm project.
+
+### Add data file from previous analysis
+```{r, message=F, warning=F}
+library(patchwork)
+library(readxl)
+library(SHAPforxgboost)
+library(MLmetrics)
+library(pROC)
+library(plyr)
+library(ggplot2)
+library(PRROC)
+library(caret)
+library(xgboost)
+library(e1071)
+library(corrplot)
+
+# Phenotype
+BMS_V9 <- read.csv("../phenotype_dataset/SPARK_collection_v9_2022-12-12/basic_medical_screening_2022-12-12.csv",header = T)
+# PRS score
+PRScs_PRS_file_group <- read.csv('PRScs_PRS_file_group.csv',check.names = F)
+PRScs_PRS_file_group$sex_code <- ifelse(PRScs_PRS_file_group$sex == 'Male', 1, 0)
+PRS_BMC <- merge(PRScs_PRS_file_group,BMS_V9,by.x ='IID' ,by.y ='subject_sp_id')
+# GS DNV
+PED_DNV <- read.csv('../DNV/DNV_rate/240429_PED_kid_BMC_DNV.csv')
+DNV_PRS_BMC <- merge(PRS_BMC[PRS_BMC$Group %in% c('ASD.All','Non-ASD.All'),],PED_DNV,by.x ='IID' ,by.y ='subject_sp_id' ) # 4805
+colnames(DNV_PRS_BMC)
+# inherited variants
+inherV_filein <- read.table('../Inherited_exonic_variants/statistical analysis/PED_kid_BMC_InheritVar_anno.txt',sep = '\t',header = T)
+rownames(inherV_filein) <- inherV_filein$subject_sp_id
+inherV_list <- c("InheritVar_D_n"  , "InheritVar_D_LOF_n"  ,"InheritVar_D_DamageMissense_n", "InheritVar_R_n", "InheritVar_R_auto_n" )
+
+
+# Whole features
+DNV_PRS_pheno <- DNV_PRS_BMC[,c('IID','ASD_code.x','prem_code.x','sex_code','Stage.x','gest_age',
+                            "NDD_DNV_n" , "LOF_n"   , 'DNV_n'                     
+                            , "NDD_LOF_n"          ,           "stand_PRS"                    
+                            ,"WES_DNV_n"       ,              "WES_NDD_DNV_n"                
+                            , "auto_DNV_n"       ,             "auto_WES_DNV_n"               
+                            ,"NDD_auto_DNV_n"    ,            "auto_LOF_n"                   
+                            , "NDD_auto_LOF_n"     ,           "NDD_auto_WES_DNV_n"           
+                             ,v_file[v_file$Data_file == 'basic_medical_screening','variable'])]
+# Birth complications - medical information
+v_file <- as.data.frame(read_excel('pheno_selection.xlsx',sheet = 1, na = 'NA'))
+BMC_V1 <- unique(v_file[v_file$Data_file == 'basic_medical_screening','variable_group'])
+BMC_V2 <- unique(v_file[v_file$Data_file == 'basic_medical_screening','variable_group2'])
+for (i in 1:length(DNV_PRS_pheno$IID)){
+  for (j in BMC_V2) {
+    v_list <- v_file[v_file$variable_group2 == j,'variable']
+    count <- sum(DNV_PRS_pheno[i,v_list],na.rm = T)
+    DNV_PRS_pheno[i,j] <- count
+  }
+  b_list <- unique(v_file[v_file$variable_group == 'birth','variable_group2'])
+  count <- sum(DNV_PRS_pheno[i,b_list] > 0,na.rm = T)
+  DNV_PRS_pheno[i,'birth'] <- count
+}
+
+BMC_B <- unique(BMC_V1,BMC_V2)
+
+for (i in BMC_B){
+  DNV_PRS_pheno[which(is.na(DNV_PRS_pheno[,i])),i] <- 0
+}
+for (i in v_file[v_file$Data_file == 'basic_medical_screening','variable']) {
+  DNV_PRS_pheno[which(is.na(DNV_PRS_pheno[,i])),i] <- 0
+}
+
+# multimorbidity
+colnames(DNV_PRS_pheno)[1:5] <- c('IID','ASD_code','Prem_code','Sex_code','Stage')
+single_record <- DNV_PRS_pheno[,c("birth_bone" ,"birth_cleft","birth_cns","birth_fac" ,"birth_gi" ,"birth_thorac","birth_urogen",'birth')]
+single_record[single_record > 0] <- 1
+
+# Prevalence
+DNV_PRS_pheno <- cbind.data.frame(DNV_PRS_pheno,single_record)
+colnames(DNV_PRS_pheno) <- c(colnames(DNV_PRS_pheno)[1:(ncol(DNV_PRS_pheno)-ncol(single_record))],paste0(c("birth_bone" ,"birth_cleft","birth_cns","birth_fac" ,"birth_gi" ,"birth_thorac","birth_urogen",'birth'),rep('_code',ncol(single_record))))
+
+# Group preterm birth and code them
+DNV_PRS_pheno[DNV_PRS_pheno$Stage=='Term','Stage'] <- 0
+DNV_PRS_pheno[DNV_PRS_pheno$Stage=='Late preterm','Stage'] <- 1
+DNV_PRS_pheno[DNV_PRS_pheno$Stage=='Moderate preterm','Stage'] <- 2
+DNV_PRS_pheno[DNV_PRS_pheno$Stage=='Very preterm','Stage'] <- 3
+DNV_PRS_pheno[DNV_PRS_pheno$Stage=='Extremely preterm','Stage'] <- 4
+DNV_PRS_pheno[DNV_PRS_pheno$Stage=='Preterm - Unknown gestational age','Stage'] <- NA
+DNV_PRS_pheno$Stage <- as.numeric(DNV_PRS_pheno$Stage)
+
+# add inherited variants information
+for (j in inherV_list){
+  for (i in 1:nrow(DNV_PRS_pheno)){
+    DNV_PRS_pheno[i,j] <- inherV_filein[DNV_PRS_pheno$IID[i],j]
+    DNV_PRS_pheno[i,j] <- inherV_filein[DNV_PRS_pheno$IID[i],j]
+  }
+}
+DNV_PRS_pheno$inheritVar_n <- DNV_PRS_pheno$InheritVar_R_n + DNV_PRS_pheno$InheritVar_D_n
+
+# Add CADD score and damage missense information
+dnv_anno <- read.table('new_dnv_missense_var_INFO_sep_KID_summary.txt',sep = '\t',header = T)
+sum(dnv_anno$REVEL_annovar == '.')
+dnv_anno_revel <- dnv_anno[dnv_anno$REVEL_annovar != '.',]
+
+for (i in 1:length(DNV_PRS_pheno$IID)){
+  iid <- DNV_PRS_pheno$IID[i]
+  DNV_PRS_pheno[i,'DNV_Damage_missense_n'] <- sum(dnv_anno[dnv_anno$Kids == iid,'Damage_missense'])
+  DNV_PRS_pheno[i,'avg_CADD_pred_CSQ'] <- mean( as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']), na.rm = T )
+  DNV_PRS_pheno[i,'avg_CADD_pred_CSQ_NDDgene'] <- mean( as.numeric(dnv_anno[which(dnv_anno$Kids ==iid & dnv_anno$ndd_gene_flag == 1),'CADD_pred_CSQ']), na.rm = T)
+  DNV_PRS_pheno[i,'avg_REVEL'] <- mean( as.numeric(dnv_anno_revel[dnv_anno_revel$Kids ==iid,'REVEL_annovar']), na.rm = T )
+  DNV_PRS_pheno[i,'avg_REVEL_NDDgene'] <- mean( as.numeric(dnv_anno_revel[which(dnv_anno_revel$Kids ==iid & dnv_anno_revel$ndd_gene_flag == 1),'REVEL_annovar']), na.rm = T)
+  DNV_PRS_pheno[i,'sum_CADD_pred_CSQ'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']),na.rm=T)
+  DNV_PRS_pheno[i,'sum_CADD_pred_CSQ_NDDgene'] <- sum(as.numeric(dnv_anno[which(dnv_anno$Kids ==iid & dnv_anno$ndd_gene_flag == 1),'CADD_pred_CSQ']), na.rm = T)
+  DNV_PRS_pheno[i,'CADD_pred_0_3_n'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) <= 3,na.rm=T)
+  DNV_PRS_pheno[i,'CADD_pred_3_10_n'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) > 3 & as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) <= 10,na.rm=T)
+  DNV_PRS_pheno[i,'CADD_pred_10_20_n'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) > 10 & as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) <= 20,na.rm=T)
+  DNV_PRS_pheno[i,'CADD_pred_20_30_n'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) > 20 & as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) <= 30,na.rm=T)
+  DNV_PRS_pheno[i,'CADD_pred_30_40_n'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) > 30 & as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) <= 40,na.rm=T)
+  DNV_PRS_pheno[i,'CADD_pred_40_n'] <- sum(as.numeric(dnv_anno[dnv_anno$Kids ==iid,'CADD_pred_CSQ']) > 40 ,na.rm=T)
+}
+prem_DNV_PRS_pheno_inherV <- DNV_PRS_pheno[DNV_PRS_pheno$Prem_code == 1,]
+```
+
+### Feature elimination
+```{r, message=F, warning=F}
+species_select <-
+  function(x,
+           y,
+           remove_correlated = T,
+           subsets = NULL,
+           cores = 1) {
+    doParallel::registerDoParallel(cores)
+    y <- factor(y)
+
+    if (remove_correlated == T) {
+      correlated <- findCorrelation(
+        cor(x, use = "complete.obs"),
+        cutoff = 0.80,
+        verbose = FALSE,
+        names = FALSE,
+        exact = FALSE
+      )
+
+      print(paste0("correlated features removed:",length(correlated),paste(correlated,collapse = ', '),'\n',paste(colnames(x)[correlated],collapse = ', ')))
+      x <- x[,-c(correlated)]
+    }
+    
+    len <- ncol(x)
+    if(is.null(subsets)){
+      subsets <-
+        c(floor(len/2), floor(len / 4), floor(len / 8), floor(len / 16), floor(len / 32),floor(len / 64))
+    }else{
+      subsets <- c(subsets,len)
+      subsets <- subsets[which(subsets <= len)]
+      subsets <- unique(subsets)
+    }
+    
+    rfe_ctrl <- rfeControl(
+      functions = rfFuncs,
+      method = "cv",
+      number =  10,
+      verbose = FALSE,
+      allowParallel = TRUE
+    )
+
+    set.seed(123)
+    featureElimination <- rfe(
+      x = x,
+      y = y,
+      sizes = subsets,
+      rfeControl = rfe_ctrl,
+      tuneLength = 2
+    )
+    doParallel::registerDoParallel(1)
+    print("feature elimination has been done ...")
+    return(featureElimination)
+}
+
+# Remove uncomplete cases
+test_df_1_remove_unknownAGE <- prem_DNV_PRS_pheno_inherV[,-which(colnames(prem_DNV_PRS_pheno_inherV) %in% c("Prem_code","med_cond_birth","avg_REVEL","avg_REVEL_NDDgene"))]  
+test_df_1_remove_unknownAGE_2 <- test_df_1_remove_unknownAGE[complete.cases(test_df_1_remove_unknownAGE),-1]
+test_df_1_remove_unknownAGE_2 <- test_df_1_remove_unknownAGE_2[,which(colSums(test_df_1_remove_unknownAGE_2)!=0)]
+
+featureElim <- species_select(x = test_df_1_remove_unknownAGE_2[,-c(1,2)],
+                              y = test_df_1_remove_unknownAGE_2[,1],
+                              remove_correlated = F,
+                              subsets = c(1:ncol(test_df_1_remove_unknownAGE_2)-1),
+                              cores = 8)
+
+optVars <- featureElim$optVariables
+v <- varImp(featureElim$fit, type = 1, scale = F)
+v[,"variable"] <- row.names(v)
+potential_feature <- v[,"variable"]
+
+## more feature selection  
+# 1.correlation test
+test_df_EF <- test_df_1_remove_unknownAGE_2[,c('ASD_code','Sex_code',potential_feature)]
+cor_matrix <- cor(test_df_EF[,-c(1,2)])
+corrplot(cor_matrix, method = "color")
+high_cor_pairs <- which(cor_matrix > 0.7, arr.ind = TRUE)
+
+high_cor_df <- data.frame(var1 = character(), var2 = character(), correlation = numeric())
+# Store pairs with correlation coefficient > 0.7 in the data frame
+for (i in 1:nrow(high_cor_pairs)) {
+  row <- high_cor_pairs[i, 1]
+  col <- high_cor_pairs[i, 2]
+  if (row < col) {
+    high_cor_df <- rbind(high_cor_df, data.frame(var1 = colnames(cor_matrix)[row], var2 = colnames(cor_matrix)[col], correlation = cor_matrix[row, col]))
+  }
+}
+
+# filter high correlation pair
+high_cor_df[order(high_cor_df$var1),]
+remove_hig_cor <- c('sum_CADD_pred_CSQ','DNV_Damage_missense_n' # DNV_n 
+                    ,'NDD_auto_LOF_n' # NDD_LOF_n
+                    ,'NDD_auto_DNV_n' # NDD_DNV_n
+                    , 'WES_DNV_n' # auto_WES_DNV_n
+                    ,'birth' # birth_code
+                    ,'birth_fac_code','birth_fac' # birth_def_fac
+                    , 'birth_urogen', 'birth_urogen_code' # birth_def_urogen
+                    ,'birth_gi','birth_gi_code' # birth_def_gastro
+                    ,'birth_bone_code')
+test_df_EF_cor <- test_df_EF[,-which(colnames(test_df_EF) %in% remove_hig_cor)]
+which(cor(test_df_EF_cor[,-c(1,2)]) > 0.7, arr.ind = TRUE)
+
+# 2. run a test model on all samples and filtered features. remove features with importance as 0
+source(Feature_Elim_model.R)
+var_importance <- Feature_Elim_model(test_df_EF_cor)
+import_0 <- as.data.frame(var_importance[["importance"]])
+import_0_feature <- rownames(import_0)[which(import_0$Overall <= 0)] # 
+test_df_EF_cor_2 <- test_df_EF_cor[,-which(colnames(test_df_EF_cor) %in% import_0_feature)]
+
+## 3. Ablation experiment and add meaningful features
+test_df_EF_cor_add3 <- test_df_1_remove_unknownAGE_2[,c(colnames(test_df_EF_cor_2),'InheritVar_D_n','DNV_n')]
+test_df_cor2 <- test_df_EF_cor_add3[,-which(colnames(test_df_EF_cor_add3) %in% c('CADD_pred_30_40_n','CADD_pred_0_3_n','sum_CADD_pred_CSQ'))]
+
+## correlation test
+correlation_matrix <- abs(cor(test_df_cor2[,-1]))
+cor_plot <- as.data.frame(as.table(correlation_matrix))
+feature_name <- cbind.data.frame('orig'=c('Sex_code','auto_WES_DNV_n','NDD_DNV_n','avg_CADD_pred_CSQ_NDDgene','sum_CADD_pred_CSQ_NDDgene',
+                                          'LOF_n','birth_code','birth_oxygen','stand_PRS','InheritVar_R_n',
+                                          'gest_age','InheritVar_D_n','DNV_n'),
+                                 'rev' = c('Sex','Autosomes-Exonic-DNV Number','NDD-DNV Number','Avg CADD Score (NDD-DNV)','Sum CADD Score (NDD-DNV)',
+                                           'LOF Number','Birth Complication Exist','Oxygen Deprivation at Birth','Polygenic Risk Score (ASD)','Recessive NDD-InherVar number',
+                                           'Gestational Age','Dominant NDD-InherVar Number','Total DNV Number'))
+
+for (i in 1:nrow(cor_plot)){
+  cor_plot[i,'Feature 1'] <- feature_name[feature_name$orig==cor_plot$Var1[i],'rev']
+  cor_plot[i,'Feature 2'] <- feature_name[feature_name$orig==cor_plot$Var2[i],'rev']
+}
+
+# correlation_plot <- 
+  ggplot(data = cor_plot, aes(x = `Feature 1`, y = `Feature 2`, fill = Freq)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = colorRampPalette(c( "blue","purple", "red"))(50), name = "Correlation") +
+  geom_text(aes(label = round(Freq, 2)), color = "white", size=3) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=10, angle = 30, hjust = 1), 
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 10),   # Adjust plot title font size
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size=10),
+        axis.title = element_blank())
+
+```
+
+### Machine learning model
+```{r, message=F, warning=F}
+sed(666)
+test_df_final <- test_df_cor2
+trainFolds_10 <-  createFolds(test_df_final[,1], k = 10, returnTrain = T)
+store_data_10 <- list()
+#iteratively train the model on each of the 10 training folds and generate predictions using the coresponding test fold.
+for (i in 1:10){
+  training <- test_df_final[trainFolds_10[[i]],]
+  testing <- test_df_final[-trainFolds_10[[i]],]
+  store_subdata <- list()
+  if(is.null(training)){
+    return(message("No training set given"))
+  } else{
+    
+    training <- droplevels(training)
+    training$ASD_code[which(training$ASD_code == 1)] <- 'ASD'
+    training$ASD_code[which(training$ASD_code == 0)] <- 'Non_ASD'
+    training$ASD_code <- as.factor(training$ASD_code)
+    # set.seed(1234)
+    folds <- createFolds(training[,"ASD_code"], k = 10, returnTrain = T)
+    
+    trControl <-  trainControl(
+      method = "repeatedcv",
+      number = 5,  repeats = 5,
+      verboseIter = FALSE,
+      returnData = FALSE,
+      search = "grid",
+      savePredictions = "final",
+      classProbs = T,
+      allowParallel = T,
+      index = folds )
+    
+    tune_grid <- expand.grid(
+      nrounds = c(100,200,300,400),
+      eta = c(0.03,0.05,0.1,0.2,0.3),
+      max_depth = c(3,6,9,12),
+      gamma = c(0,1,3,5),
+      colsample_bytree = c(0.3,0.5,0.75),
+      min_child_weight = c(1,3),
+      subsample = (0.8))
+    
+    Xgb_model_final <- train(x = training[,-1],y = training[,1],
+                             method = "xgbTree",
+                             trControl = trControl,
+                             tuneGrid = tune_grid,
+                             scale_pos_weight = 0.6,
+                             verbosity = 0, # ignore the warning for name changing in xgboost from caret
+                             nthread = 16)
+    
+    store_subdata[[1]] <- Xgb_model_final
+    message("Generating predictions")
+    #generate predictions for test set
+    regProbs <- predict(Xgb_model_final, newdata = testing[,-1],type ="prob")
+    regPred <- predict(Xgb_model_final, newdata = testing[,-1])
+    
+    store_subdata[[2]] <- regProbs
+    store_subdata[[3]] <- regPred
+    store_data_10[[i]] <- store_subdata
+  }
+}
+
+add_preds <- list()
+for (i in 1:10){
+  add_preds[[i]] <- cbind(test_df_final[-trainFolds_10[[i]],] , 
+                          store_data_10[[i]][[2]],
+                          store_data_10[[i]][[3]])
+}
+DataPreds_10 <- rbind.fill(add_preds)
+
+DataPreds <- DataPreds_10
+training$ASD_code[which(training$ASD_code == 1)] <- 'ASD'
+training$ASD_code[which(training$ASD_code == 0)] <- 'Non_ASD'
+DataPreds$ASD_code[which(DataPreds$ASD_code == 1)] <- 'ASD'
+DataPreds$ASD_code[which(DataPreds$ASD_code == 0)] <- 'Non_ASD'
+
+## ROC
+class_item <- colnames(regProbs)
+probabilities <- DataPreds[,class_item]
+roc_obj <- roc(response = DataPreds[,'ASD_code'], predictor = probabilities[,1])
+# png("AUC_prem_xgb.png", width = 6, height = 5, units = 'in', res = 600)
+plot(roc_obj,main=paste('AUC:',round(auc(roc_obj),3)))
+# dev.off()
+auc(roc_obj)
+
+## variance importance for one of the model
+# png("importance_prem_xgb_F3.png", width = 6, height = 5, units = 'in', res = 600)
+var_importance <- varImp(store_data_10[[3]][[1]], type = 1, scale = F) # order is different for each part
+# plot(var_importance, main = "Variable Importance")
+# dev.off()
+import_xgb_3 <- as.data.frame(var_importance[["importance"]])
+for (i in 1:nrow(import_xgb_3)){
+  import_xgb_3[i,'Feature'] <- feature_name[feature_name$orig==rownames(import_xgb_3)[i],'rev']
+}
+
+xgb_3_importance <-
+ggplot(import_xgb_3, aes(x = reorder(Feature, Overall), y = Overall)) +
+  geom_segment(aes(xend = reorder(Feature, Overall), yend = 0), color = "grey") +
+  geom_point(color = "steelblue", size = 2) +
+  geom_hline(aes(yintercept = 0),colour = 'grey', linetype = "dashed")+
+  coord_flip() +
+  theme_bw() +
+  labs(x = "Feature",
+       y = "Importance")+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank())
+
+confusion_matrix <- confusionMatrix(as.factor(DataPreds$`store_data_10[[i]][[3]]`), as.factor(DataPreds$ASD_code))
+confusionMatrix(as.factor(DataPreds$`store_data_10[[i]][[3]]`), as.factor(DataPreds$ASD_code))
+F1_Score(as.factor(DataPreds$`store_data_10[[i]][[3]]`), as.factor(DataPreds$ASD_code))
+PRAUC(probabilities[,1], as.factor(DataPreds$ASD_code))
+
+## SHAP value and figure
+shap_long <- shap.prep(xgb_model = store_data_10[[3]][[1]]$finalModel, X_train = as.matrix(test_df_final[trainFolds_10[[3]],-1]))
+feature_order <- levels(shap_long$variable)
+feature_order_rev <- c()
+for (i in feature_order) {
+  feature_order_rev <- c(feature_order_rev,feature_name[feature_name$orig==i,'rev'])
+}
+
+shap_long$variable <- as.character(shap_long$variable)
+for (i in 1:nrow(shap_long)) {
+  shap_long[i,'variable'] <- feature_name[feature_name$orig==shap_long$variable[i],'rev']
+}
+shap_long$variable <- factor(shap_long$variable,levels = feature_order_rev)
+
+xgb_3_SHAP <-
+shap.plot.summary(shap_long)
+# ggsave('240612_SHAP_prem_xgb_F3.png',plot = last_plot(),width = 6,height = 5,dpi = 600,limitsize = TRUE)
+# save(xgb_3_SHAP, file = "figure_rdata/xgb_3_SHAP.rdata")
+```
