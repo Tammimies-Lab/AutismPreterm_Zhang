@@ -1,1 +1,1 @@
-This is the Github repository for ASD-preterm project.
+This GitHub repository contains the source files and custom R code used in the analysis for the ASD-preterm project.
