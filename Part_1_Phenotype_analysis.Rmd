@@ -9,9 +9,9 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-For manuscript - Prematurity and Genetic Liability for Autism Spectrum Disorder  \ 
+For manuscript - Prematurity and Genetic Liability for Autism Spectrum Disorder\
 
-This is an R Markdown document that records the main script used for phenotype part analysis.  \    
+This is an R Markdown document that records the main script used for phenotype part analysis.\
 
 
 ### ORs for prevalence
