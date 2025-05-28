@@ -1,0 +1,189 @@
+---
+title: "ML_model"
+author: "Yali Zhang"
+date: "2025-05-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For manuscript - Prematurity and Genetic Liability for Autism Spectrum Disorder  \  
+
+This is an R Markdown document that records the main script used for machine learning model part.  \    
+
+
+### Feature elimination
+
+Here we have metadata file "df" with columns for each individual:  \  
+| delivery_term | ASD_status | Feature_1 | Feature_2 | ... | Feature_n |
+
+```{r}
+library(plyr)
+library(caret)
+library(xgboost)
+library(e1071)
+library(randomForest)
+
+species_select <-
+  function(x,
+           y,
+           subsets = NULL,
+           cores = 1) {
+    doParallel::registerDoParallel(cores)
+
+    y <- factor(y)
+
+    len <- ncol(x)
+    if(is.null(subsets)){
+      subsets <-
+        c(floor(len/2), floor(len / 4), floor(len / 8), floor(len / 16), floor(len / 32),floor(len / 64))
+    }else{
+      subsets <- c(subsets,len)
+      subsets <- subsets[which(subsets <= len)]
+      subsets <- unique(subsets)
+    }
+
+    rfe_ctrl <- rfeControl(
+      functions = rfFuncs,
+      method = "cv",
+      number =  10,
+      verbose = FALSE,
+      allowParallel = TRUE
+    )
+    
+    set.seed(123)
+    featureElimination <- rfe(
+      x = x,
+      y = y,
+      sizes = subsets,
+      rfeControl = rfe_ctrl,
+      tuneLength = 2
+    )
+    doParallel::registerDoParallel(1)
+    print("feature elimination has been done ...")
+    return(featureElimination)
+  }
+
+# For model used in preterm
+# df <- df[df$delivery_term == 'Preterm',]
+
+featureElim <- species_select(x = df[,-c(1,2)],
+                              y = df[,2],
+                              subsets = c(1:ncol(df)-1),
+                              cores = 8)
+optVars <- featureElim$optVariables
+
+# correlation of features
+cor_matrix <- cor(df[,optVars])
+```
+
+### Machine learning models
+
+Now we have dataset df with selected optimal features:  \  
+| ASD_status | | Feature_1 | Feature_2 | ... | Feature_n |
+
+```{r}
+trainFolds_10 <-  createFolds(df[,2], k = 10, returnTrain = T)
+store_data_10 <- list()
+#iteratively train the model on each of the 5 training folds and generate predictions using the coresponding test fold.
+for (i in 1:10){
+  
+  training <- df[trainFolds_10[[i]],]
+  testing <- df[-trainFolds_10[[i]],]
+  
+  store_subdata <- list()
+  if(is.null(training)){
+    return(message("No training set given"))
+  } else{
+    
+    training <- droplevels(training)
+    training$ASD_status <- as.factor(training$ASD_status)
+    
+    #Train mGPS with 10-fold cross validation of training set for hyperparameter tuning. 
+    
+    # set.seed(1234)
+    folds <- createFolds(training[,"ASD_status"], k = 10, returnTrain = T)
+    
+    trControl <-  trainControl(
+      method = "repeatedcv",
+      number = 10,  repeats = 10,
+      verboseIter = FALSE,
+      returnData = FALSE,
+      search = "grid",
+      savePredictions = "final",
+      classProbs = T,
+      allowParallel = T,
+      index = folds )
+    
+    # XGBoost ===========
+    tune_grid <- expand.grid(
+      nrounds = c(100,200,300,400),
+      eta = c(0.03,0.05,0.1,0.2,0.3),
+      max_depth = c(3,6,9,12),
+      gamma = c(0,1,3,5),
+      colsample_bytree = c(0.3,0.5,0.75),
+      min_child_weight = c(1,3),
+      subsample = (0.8))
+      
+    Xgb_model_final <- train(x = training[,-1],y = training[,1],
+                             method = "xgbTree",
+                             trControl = trControl,
+                             tuneGrid = tune_grid,
+                             scale_pos_weight = 0.6, # weight the ratio of non-ASD and ASD
+                             verbosity = 0, 
+                             nthread = 16)
+    # ======================
+    
+    # random forest ========
+    
+    tune_grid <- expand.grid(.mtry = c(1,3,5,7,10,15,20))
+    
+    Xgb_model_final <- train(ASD_code~.,
+                      data = training,
+                      method = "rf",
+                      tuneGrid = tune_grid,
+                      trControl = trControl,
+                      ntrees = 1000,
+                      nthread = 16)
+    # ======================
+    
+    # SVM ==================
+    
+    tune_grid <- expand.grid(C = c(0,0.01,0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2))
+    
+    Xgb_model_final <-  train(
+      ASD_code ~., data = training, method = "svmLinear",
+      trControl = trControl,
+      tuneGrid = tune_grid,
+      preProcess = c("center","scale"),
+      na.action = na.roughfix,
+      nthread = 16)
+    # ======================
+    
+    store_subdata[[1]] <- Xgb_model_final
+    message("Generating predictions")
+    #generate predictions for test set
+    regProbs <- predict(Xgb_model_final, newdata = testing[,-1],type ="prob")
+    regPred <- predict(Xgb_model_final, newdata = testing[,-1])
+    
+    store_subdata[[2]] <- regProbs
+    store_subdata[[3]] <- regPred
+    store_data_10[[i]] <- store_subdata
+  }
+}
+
+add_preds <- list()
+for (i in 1:10){
+  add_preds[[i]] <- cbind(test_df_final[-trainFolds_10[[i]],] , 
+                          store_data_10[[i]][[2]],
+                          store_data_10[[i]][[3]])
+}
+DataPreds_10 <- rbind.fill(add_preds)
+```
+
+
+
+
+

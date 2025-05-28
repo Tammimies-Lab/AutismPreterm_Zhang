@@ -1,0 +1,93 @@
+---
+title: "Genetic_part"
+author: "Yali Zhang"
+date: "2025-05-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+For manuscript - Prematurity and Genetic Liability for Autism Spectrum Disorder  \ 
+
+This is an R Markdown document that records the main script used for genetic part analysis.  \    
+
+
+### Event rate of variants
+
+Here we have metadata file "df" with columns for each individual:  \ 
+| delivery_term | ASD_status | Family_ID | sex | age | Variant |   \  
+Column Variant recods the number of specific variant (e.g. DNV, inherited variants) found in each individual.
+
+```{r}
+
+event_rate_calculation <- function(var1 = 'ASD_status',
+                             cond1 = 'ASD',
+                             var2 = 'delivery_term',
+                             df = df,
+                             variant = 'Variant',
+                             covariate = NULL){
+  
+  var2_group1 <- unique(df[,var2])[1]
+  var2_group2 <- unique(df[,var2])[2]
+  
+  n1 <- sum(df[,var1] == cond1 & df[,var2]== var2_group1) 
+  n2 <- sum(df[,var1] == cond1 & df[,var2]== var2_group2) 
+  
+  r_1 <- mean(df[which(df[,var1]  == cond1 & df[,var2]  == var2_group1),variant],na.rm = T)
+  r_2 <- mean(df[which(df[,var1]  == cond1 & df[,var2]  == var2_group2),variant],na.rm = T)
+  
+  sd_1 <- sd(df[which(df[,var1]  == cond1 & df[,var2]  == var2_group1),variant],na.rm = T) / sqrt(n1)
+  sd_2 <- sd(df[which(df[,var1]  == cond1 & df[,var2]  == var2_group2),variant],na.rm = T) / sqrt(n2)
+  
+  model1 <- geeglm(formula = reformulate(termlabels = c(covariate), response = variant),
+                   id = family_sf_id_code, data = df[df[,var1] == cond1,], family = poisson(), corstr = "independence") 
+  model1.sum <- summary(model1) 
+  p.gee <- model1.sum[["coefficients"]][["Pr(>|W|)"]][2]
+  
+  df_out <- cbind.data.frame('DNV_rate' = c(r_1,r_2), 'rate_sd' = c(sd_1,sd_2) ,var2 = c(var2_group1,var2_group2), 'Variant' = c(variant,variant),'GEE_p' = c(p.gee,p.gee) )
+  
+  return(df_out)
+}
+
+### Within ASD
+
+rate_df <- event_rate_calculation(var1 = 'ASD', # within region
+                         cond1 = '2', 
+                         var2 = 'delivery_term', # compare group
+                         df = df,
+                         variant = Variant,
+                         covariate = c('delivery_term','sex'))
+
+colnames(rate_df) <- c('Event_rate',"SE",'Delivery','Variant','GEE_p')
+
+## Within preterm
+rate_df <- event_rate_calculation(var1 = 'delivery_term', # within region
+                           cond1 = 'Preterm', 
+                           var2 = 'ASD', # compare group
+                           df = df,
+                           variant = Variant,
+                           covariate = c('delivery_term','sex'))
+```
+
+### PRS
+Here we have metadata file "df" with columns for each individual:  \  
+| delivery_term | ASD_status | Family_ID | sex | age | PRS |   \  
+
+```{r}
+# standardize PRS
+df[,'standardize.PRS'] <- scale(df$PRS, center = TRUE, scale = TRUE)[,1]
+
+# GEE model
+prs_gee <- geeglm(ASD_status ~ delivery_term + standardize.PRS + sex, id = Family_ID, data = df, family =  binomial(link = "logit"))
+
+# visualization
+library(coefplot)
+coefplot(prs_gee, ci.style = "errorbar", ci.width = "Std.err")
+
+library(ggeffects)
+ggemmeans(prs_gee, terms = c("standardize.PRS [all]","delivery_term","sex"),rg.limit = 15000) 
+```
+
+
+

@@ -1,0 +1,145 @@
+---
+title: "Phenotype_part"
+author: "Yali Zhang"
+date: "2025-05-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For manuscript - Prematurity and Genetic Liability for Autism Spectrum Disorder  \ 
+
+This is an R Markdown document that records the main script used for phenotype part analysis.  \    
+
+
+### ORs for prevalence
+
+Here we have metadata file "df" with columns for each individual:  \  
+| delivery_term | ASD_status | Family_ID | sex | age | diagnostic_category_1 | diagnostic_category_2 | ... | diagnostic_category_9 |  \  
+In columns diagnostic_category, 1/0 labeled if that individual experience that issue.
+
+```{r cars}
+library(epiR)
+library(epitools)
+
+# ASD-preterm vs. ASD-term
+variable <- df$delivery_term # Preterm or Term
+# ASD-preterm vs. non-ASD-preterm
+# variable <- df$ASD_status # ASD or non-ASD
+
+# ASD-preterm vs. ASD-term
+df <- df[df$ASD_status=='ASD',]
+# ASD-preterm vs. non-ASD-preterm
+# df <- df[df$delivery_term=='Preterm',]
+
+freq_df <- data.frame(row.names = diagnostic_categories)
+freq_df$Phenotype <- diagnostic_categories
+
+for (phe in diagnostic_categories){
+  # Create a binary outcome variable indicating Preterm vs Term status
+  diagnosis <- df[,phe]
+  table <- table(variable, diagnosis)
+  # phe <- str_to_title(phe)
+
+  # calculate ORs with 95% CI
+  freq_df[freq_df$Phenotype == phe,'OR'] <- oddsratio(table,rev = 'rows')$measure[2,1]
+  freq_df[freq_df$Phenotype == phe,'lower_CI'] <- oddsratio(table,rev = 'rows')$measure[2,2]
+  freq_df[freq_df$Phenotype == phe,'upper_CI'] <- oddsratio(table,rev = 'rows')$measure[2,3]
+  freq_df[freq_df$Phenotype == phe,'chi_square_p_OR'] <- oddsratio(table,rev = 'rows')$p.value[2,3]
+
+  df$Diagnosis <- diagnosis
+  df_gee <- df[order(df$Family_ID),]
+  
+  # ASD-preterm vs. ASD-term
+  phe_freq_gee <- gee(Diagnosis ~ delivery_term + sex + age,  data = df_gee, link='logit' , clusterid='Family_ID')
+  # ASD-preterm vs. non-ASD-preterm
+  # phe_freq_gee <- gee(Diagnosis ~ ASD_status + sex + age,  data = df_gee, link='logit' , clusterid='Family_ID')
+  
+  cof <- exp( c( phe_freq_gee$coefficients[2] , confint(phe_freq_gee)[2,] ) )
+
+  freq_df[freq_df$Phenotype == phe,'GEE_OR'] <- cof[1]
+  freq_df[freq_df$Phenotype == phe,'GEE_lower_CI'] <- cof[2]
+  freq_df[freq_df$Phenotype == phe,'GEE_upper_CI'] <- cof[3]
+  freq_df[freq_df$Phenotype == phe,'GEE_p'] <- sum_gee[["coefficients"]][2,4]
+}
+
+# Apply FDR correction
+freq_df$p_values_chi.adj <- p.adjust(freq_df$chi_square_p_OR, method = "fdr")
+freq_df$p_values_gee.adj <- p.adjust(freq_df$GEE_p, method = "fdr")
+```
+
+### ORs for multimorbidity
+
+Here we have metadata file "df" with columns for each individual:  \  
+| delivery_term | ASD_status | Family_ID | sex | age | multimorbidity_group |  \  
+In columns multimorbidity_group, (0,1,2,3,4,>=5) labeled how many diagnostic categories that individual experience.
+
+```{r cars}
+library(epiR)
+library(epitools)
+
+# ASD-preterm vs. ASD-term
+variable <- df$delivery_term # Preterm or Term
+# ASD-preterm vs. non-ASD-preterm
+# variable <- df$ASD_status # ASD or non-ASD
+
+# ASD-preterm vs. ASD-term
+df <- df[df$ASD_status=='ASD',]
+# ASD-preterm vs. non-ASD-preterm
+# df <- df[df$delivery_term=='Preterm',]
+
+item <- df[,'multimorbidity_group']
+
+num <- length(unique(item))
+
+odds_ratios = numeric(num)
+lower_CI = numeric(num)
+upper_CI = numeric(num)
+position = numeric(num)
+chi.square = numeric(num)
+Multi_GEE_OR = numeric(num)
+Multi_GEE_lower_CI = numeric(num)
+Multi_GEE_upper_CI = numeric(num)
+Multi_GEE_p = numeric(num)
+
+for (i in 0:(num-1)) {
+  
+  j <- unique(item)[i+1]
+  
+  item_group = as.numeric(item == j)
+  
+  ## normal OR
+  position[i+1] = j
+  table = table(variable,item_group)
+  odds_ratios[i+1] = oddsratio(table)$measure[2,1]
+  lower_CI[i+1] = oddsratio(table)$measure[2,2]
+  upper_CI[i+1] = oddsratio(table)$measure[2,3]
+  chi.square[i+1] = oddsratio(table)$p.value[2,3]
+ 
+  # GEE OR
+  df$Multi_count <- item_group
+  
+  df_gee <- df[order(df$Family_ID),]
+  
+  # ASD-preterm vs. ASD-term
+  phe_multi_gee <- gee(Multi_count ~ delivery_term + sex + age,  data = df_gee, , link='logit' , clusterid='Family_ID')
+  # ASD-preterm vs. non-ASD-preterm
+  # phe_multi_gee <- gee(Multi_count ~ ASD_status + sex + age,  data = df_gee, , link='logit' , clusterid='Family_ID')
+    
+  cof <- exp( c( phe_multi_gee$coefficients[2] , confint(phe_multi_gee)[2,] ) )
+  
+  Multi_GEE_OR[i+1] <- cof[1]
+  Multi_GEE_lower_CI[i+1] <- cof[2]
+  Multi_GEE_upper_CI[i+1] <- cof[3]
+  Multi_GEE_p[i+1] <- sum_gee[["coefficients"]][2,4]
+}
+
+chi.square.fdr <- p.adjust(chi.square, method = "fdr")
+GEE_p.fdr <- p.adjust(Multi_GEE_p, method = "fdr")
+
+df_one <-cbind.data.frame(point = position, OR = odds_ratios, CI_lower = lower_CI, CI_upper = upper_CI,chi.square=chi.square,chi.square.fdr=chi.square.fdr, GEE_OR = Multi_GEE_OR, GEE_CI_lower = Multi_GEE_lower_CI, GEE_CI_upper = Multi_GEE_upper_CI,GEE_p = Multi_GEE_p, GEE_p.fdr=GEE_p.fdr)
+```
+
+
